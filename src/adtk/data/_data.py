@@ -573,6 +573,7 @@ def expand_events(  # type:ignore
             time_index=labels.index,
             freq_as_period=freq_as_period,
         )  # type: pd.Series
+        expanded_labels = expanded_labels.astype(float)
         expanded_labels.loc[
             (expanded_labels == False) & (labels.isna())
         ] = float("nan")
