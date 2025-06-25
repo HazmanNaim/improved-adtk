@@ -182,7 +182,7 @@ class OutlierDetector(_TrainableMultivariateDetector):
             else:
                 is_outliers.loc[df.dropna().index] = (
                     self.model.fit_predict(df.dropna()) == -1
-                )
+                ).astype(float)
         predicted = pd.Series(is_outliers == 1, index=df.index)
         predicted[is_outliers.isna()] = float("nan")
         return predicted
