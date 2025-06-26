@@ -103,6 +103,8 @@ def test_attribute(testCase):
                 pd.Series(value, index=s.index[: len(value)]),
                 check_dtype=False,
                 check_names=False,
+                check_exact=False,
+                rtol=1e-10,  # or atol=1e-10
             )
         else:
             assert getattr(model, key) == value

@@ -1356,24 +1356,20 @@ class Pipenet:
 
     def summary(self) -> None:
         """Print a summary of the pipenet."""
-        df = pd.DataFrame(columns=["name", "model", "input", "subset"])
+        rows = []
         for step_name in self.steps_graph_.keys():
             if step_name == "original":
                 continue
-            df = df.append(
-                {
-                    "name": step_name,
-                    "model": self.steps[step_name]["model"].__class__.__name__,
-                    "input": self.steps[step_name]["input"],
-                    "subset": (
-                        self.steps[step_name]["subset"]
-                        if "subset" in self.steps[step_name].keys()
-                        else "all"
-                    ),
-                },
-                ignore_index=True,
-            )
+            step = self.steps[step_name]
+            rows.append({
+                "name": step_name,
+                "model": step["model"].__class__.__name__,
+                "input": step["input"],
+                "subset": step.get("subset", "all"),
+            })
+        df = pd.DataFrame(rows, columns=["name", "model", "input", "subset"])
         print(tabulate(df, headers="keys", tablefmt="simple", showindex=False))
+
 
     def plot_flowchart(
         self,

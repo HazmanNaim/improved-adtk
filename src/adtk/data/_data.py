@@ -161,7 +161,7 @@ def validate_events(
     merged_event_list = (
         []
     )  # type: List[Union[Tuple[pd.Timestamp, pd.Timestamp], pd.Timestamp]]
-    for t, v in time_window_end_series.iteritems():  # type: pd.Timestamp, int
+    for t, v in time_window_end_series.items():  # type: pd.Timestamp, int
         if (status == 0) and (v > 0):
             start = t  # type: pd.Timestamp
             status = 1
@@ -573,6 +573,7 @@ def expand_events(  # type:ignore
             time_index=labels.index,
             freq_as_period=freq_as_period,
         )  # type: pd.Series
+        expanded_labels = expanded_labels.astype(float)
         expanded_labels.loc[
             (expanded_labels == False) & (labels.isna())
         ] = float("nan")
@@ -588,7 +589,7 @@ def expand_events(  # type:ignore
                     right_expand=right_expand,
                     freq_as_period=freq_as_period,
                 )
-                for _, s in events.iteritems()
+                for _, s in events.items()
             ],
             axis=1,
         )  # type: pd.DataFrame

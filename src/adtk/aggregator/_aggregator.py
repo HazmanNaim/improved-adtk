@@ -121,8 +121,9 @@ class OrAggregator(_Aggregator):
                     pd.concat(lists, join="outer", axis=1)
                 )
         else:  # pandas DataFrame
-            predicted = lists.any(axis=1)
-            predicted[~predicted & lists.isna().any(axis=1)] = float("nan")
+            predicted = lists.any(axis=1).astype(float)
+            mask = (predicted == 0.0) & lists.isna().any(axis=1)
+            predicted[mask] = float("nan")
             return predicted
 
 
@@ -184,8 +185,8 @@ class AndAggregator(_Aggregator):
                 }
                 time_window_stats = (
                     pd.concat(time_window_stats, axis=1, join="outer")
-                    .fillna(method="ffill")
-                    .fillna(method="bfill")
+                    .ffill()
+                    .bfill()
                     .fillna(0)
                 )
                 time_window_stats = time_window_stats.all(axis=1)
@@ -207,6 +208,7 @@ class AndAggregator(_Aggregator):
                     pd.concat(lists, join="outer", axis=1)
                 )
         else:  # pandas DataFrame
-            predicted = lists.all(axis=1)
-            predicted[predicted & lists.isna().any(axis=1)] = float("nan")
+            predicted = lists.all(axis=1).astype(float)
+            mask = (predicted == 1.0) & lists.isna().any(axis=1)
+            predicted[mask] = float("nan")
             return predicted

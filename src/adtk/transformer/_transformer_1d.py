@@ -567,15 +567,13 @@ class DoubleRollingAggregate(_NonTrainableUnivariateTransformer):
                     center=False,
                 ).transform(s.shift(window[1]))
             else:
-                s_shifted = pd.Series(
+                series_shifted = pd.Series(
                     s.values, s.index + pd.Timedelta(window[1])
                 )
-                s_shifted = s_shifted.append(
-                    pd.Series(index=s.index, dtype="float64")
-                )
-                s_shifted = s_shifted.iloc[
-                    s_shifted.index.duplicated() == False
-                ]
+                s_shifted = pd.concat([series_shifted, pd.Series(index=s.index, dtype="float64")])
+
+                s_shifted = s_shifted[~s_shifted.index.duplicated(keep="first")]
+                
                 s_shifted = s_shifted.sort_index()
                 s_shifted.name = s.name
                 s_rolling_left = RollingAggregate(
@@ -726,9 +724,9 @@ class ClassicSeasonalDecomposition(_TrainableUnivariateTransformer):
                 : self.freq_
             ]
         else:
-            self.seasonal_ = s.iloc[: self.freq_].copy()
+            self.seasonal_ = s.iloc[: self.freq_].copy().astype(float)
             for i in range(len(self.seasonal_)):
-                self.seasonal_.iloc[i] = s.iloc[
+                self.seasonal_.iloc[i] = s.iloc[ 
                     i :: len(self.seasonal_)
                 ].mean()
 
