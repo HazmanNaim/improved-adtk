@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import numpy as np
 import pandas as pd
 import statsmodels
+import logging
 from packaging.version import parse
 from statsmodels.tsa.seasonal import seasonal_decompose
 from statsmodels.tsa.stattools import acf
@@ -21,6 +22,7 @@ from .._transformer_base import (
 )
 from .._utils import PandasBugError
 
+logger = logging.getLogger(__name__)
 
 class CustomizedTransformer1D(_TrainableUnivariateTransformer):
     """Univariate transformer derived from a user-given function and parameters.
@@ -464,166 +466,108 @@ class DoubleRollingAggregate(_NonTrainableUnivariateTransformer):
         ] = "l1",
     ) -> None:
         super().__init__()
+        self.window = window
         self.agg = agg
         self.agg_params = agg_params
-        self.window = window
-        self.min_periods = min_periods
         self.center = center
+        self.min_periods = min_periods
         self.diff = diff
 
     @property
     def _param_names(self) -> Tuple[str, ...]:
-        return ("window", "agg", "agg_params", "center", "min_periods")
+        return ("window", "agg", "agg_params", "center", "min_periods", "diff")
 
     def _predict_core(self, s: pd.Series) -> pd.Series:
-        if not (
-            s.index.is_monotonic_increasing or s.index.is_monotonic_decreasing
-        ):
-            raise ValueError("Time series must have a monotonic time index. ")
+        logger.info(
+            "DoubleRollingAggregate initialized with window=%s, agg=%s, agg_params=%s, center=%s, min_periods=%s, diff=%s",
+            self.window, self.agg, self.agg_params, self.center, self.min_periods, self.diff,
+        )
+        # Start prediction
+        length = len(s)
+        logger.info("Starting DoubleRollingAggregate prediction on series of length %d", length)
 
-        agg = self.agg
-        agg_params = self.agg_params if (self.agg_params is not None) else {}
-        window = self.window
-        min_periods = self.min_periods
-        center = self.center
-        diff = self.diff
+        if not (s.index.is_monotonic_increasing or s.index.is_monotonic_decreasing):
+            logger.error("Time series index is not monotonic; raising ValueError")
+            raise ValueError("Time series must have a monotonic time index.")
 
-        if not isinstance(agg, tuple):
-            agg = (agg, agg)
+        # Normalize parameters
+        agg = self.agg if isinstance(self.agg, tuple) else (self.agg, self.agg)
+        agg_params = self.agg_params if isinstance(self.agg_params, tuple) else (self.agg_params, self.agg_params)
+        window = self.window if isinstance(self.window, tuple) else (self.window, self.window)
+        min_periods = self.min_periods if isinstance(self.min_periods, tuple) else (self.min_periods, self.min_periods)
+        logger.info(
+            "Normalized parameters: left_window=%s, right_window=%s, min_periods=%s, agg=%s",
+            window[0], window[1], min_periods, agg,
+        )
 
-        if not isinstance(agg_params, tuple):
-            agg_params = (agg_params, agg_params)
+        # Compute left and right aggregates
+        if self.center:
+            s_left = RollingAggregate(
+                agg=agg[0], agg_params=agg_params[0], window=window[0], min_periods=min_periods[0], center=False
+            ).transform(s.shift(1))
+            s_right = RollingAggregate(
+                agg=agg[1], agg_params=agg_params[1], window=window[1], min_periods=min_periods[1], center=False
+            ).transform(s.iloc[::-1]).iloc[::-1]
+            logger.info("Center=True: shifted left by 1, reversed right computation")
+        else:
+            shift_amount = window[1] if isinstance(window[1], int) else pd.Timedelta(window[1])
+            s_left = RollingAggregate(
+                agg=agg[0], agg_params=agg_params[0], window=window[0], min_periods=min_periods[0], center=False
+            ).transform(s.shift(shift_amount))
+            s_right = RollingAggregate(
+                agg=agg[1], agg_params=agg_params[1], window=window[1], min_periods=min_periods[1], center=False
+            ).transform(s)
+            logger.info("Center=False: left shifted by %s", shift_amount)
 
-        if not isinstance(window, tuple):
-            window = (window, window)
+        # Log missing data
+        left_nans = int(s_left.isna().sum())
+        right_nans = int(s_right.isna().sum())
+        logger.info("Aggregated windows: left_NaNs=%d, right_NaNs=%d", left_nans, right_nans) # If you see this log, this means that there are NaNs because no prior points at initial timestamp. So, totally normal.
 
-        if not isinstance(min_periods, tuple):
-            min_periods = (min_periods, min_periods)
-
-        if center:
-            if isinstance(window[0], int):
-                s_rolling_left = RollingAggregate(
-                    agg=agg[0],
-                    agg_params=agg_params[0],
-                    window=window[0],
-                    min_periods=min_periods[0],
-                    center=False,
-                ).transform(s.shift(1))
+        # Calculate difference
+        if isinstance(s_left, pd.Series):
+            if self.diff == "l1":
+                result = abs(s_right - s_left) # Measure magnitude
+            elif self.diff == "l2":
+                result = ((s_right - s_left) ** 2).sum(axis=1) ** 0.5
+            elif self.diff == "diff":
+                result = s_right - s_left # Measure the sign (positive or negative)
+            elif self.diff == "rel_diff":
+                result = (s_right - s_left) / s_left
+            elif self.diff == "abs_rel_diff":
+                result = abs(s_right - s_left) / s_left
             else:
-                ra = RollingAggregate(
-                    agg=agg[0],
-                    agg_params=agg_params[0],
-                    window=window[0],
-                    min_periods=min_periods[0],
-                    center=False,
+                result = pd.Series(
+                    [self.diff(l, r) for l, r in zip(s_left, s_right)], index=s.index
                 )
-                if parse(pd.__version__) < parse("0.25"):
-                    raise PandasBugError()
-                ra._closed = "left"
-                s_rolling_left = ra.transform(s)
-            if isinstance(window[1], int):
-                s_rolling_right = (
-                    RollingAggregate(
-                        agg=agg[1],
-                        agg_params=agg_params[1],
-                        window=window[1],
-                        min_periods=min_periods[1],
-                        center=False,
-                    )
-                    .transform(s.iloc[::-1])
-                    .iloc[::-1]
-                )
+        else:
+            if self.diff == "l1":
+                result = abs(s_right - s_left).sum(axis=1, skipna=False)
+            elif self.diff == "l2":
+                result = ((s_right - s_left) ** 2).sum(axis=1, skipna=False) ** 0.5
             else:
-                s_reversed = pd.Series(
-                    s.values[::-1],
-                    index=pd.DatetimeIndex(
-                        [
-                            s.index[0] + (s.index[-1] - s.index[i])
-                            for i in range(len(s) - 1, -1, -1)
-                        ]
-                    ),
-                )
-                s_rolling_right = pd.Series(
-                    RollingAggregate(
-                        agg=agg[1],
-                        agg_params=agg_params[1],
-                        window=window[1],
-                        min_periods=min_periods[1],
-                        center=False,
-                    )
-                    .transform(s_reversed)
-                    .iloc[::-1]
-                    .values,
+                result = pd.Series(
+                    [self.diff(l.values, r.values) for _, l, _, r in zip(s.index, s_left.iteritems(), s.index, s_right.iteritems())],
                     index=s.index,
                 )
-                s_rolling_right.name = s.name
+
+        # Final stats
+        nan_count = int(result.isna().sum())
+        non_na = length - nan_count
+        if non_na > 0:
+            # Depending on the `side` parameter to consider as anomaly
+            result_min = float(np.nanmin(result))
+            result_max = float(np.nanmax(result))
+            # timestamps for min/max
+            timestamp_min = result.idxmin()
+            timestamp_max = result.idxmax()
+            logger.info(
+                "Difference result (median difference): count non-NaN=%d, min=%.4f at %s, max=%.4f at %s",
+                non_na, result_min, timestamp_min, result_max, timestamp_max
+            )
         else:
-            if isinstance(window[1], int):
-                s_rolling_left = RollingAggregate(
-                    agg=agg[0],
-                    agg_params=agg_params[0],
-                    window=window[0],
-                    min_periods=min_periods[0],
-                    center=False,
-                ).transform(s.shift(window[1]))
-            else:
-                series_shifted = pd.Series(
-                    s.values, s.index + pd.Timedelta(window[1])
-                )
-                s_shifted = pd.concat([series_shifted, pd.Series(index=s.index, dtype="float64")])
-
-                s_shifted = s_shifted[~s_shifted.index.duplicated(keep="first")]
-                
-                s_shifted = s_shifted.sort_index()
-                s_shifted.name = s.name
-                s_rolling_left = RollingAggregate(
-                    agg=agg[0],
-                    agg_params=agg_params[0],
-                    window=window[0],
-                    min_periods=min_periods[0],
-                    center=False,
-                ).transform(s_shifted)
-                if isinstance(s_rolling_left, pd.Series):
-                    s_rolling_left = s_rolling_left[s.index]
-                else:
-                    s_rolling_left = s_rolling_left.loc[s.index, :]
-            s_rolling_right = RollingAggregate(
-                agg=agg[1],
-                agg_params=agg_params[1],
-                window=window[1],
-                min_periods=min_periods[1],
-                center=False,
-            ).transform(s)
-
-        if isinstance(s_rolling_left, pd.Series):
-            if diff in ["l1", "l2"]:
-                return abs(s_rolling_right - s_rolling_left)
-            if diff == "diff":
-                return s_rolling_right - s_rolling_left
-            if diff == "rel_diff":
-                return (s_rolling_right - s_rolling_left) / s_rolling_left
-            if diff == "abs_rel_diff":
-                return abs(s_rolling_right - s_rolling_left) / s_rolling_left
-
-        if isinstance(s_rolling_left, pd.DataFrame):
-            if diff == "l1":
-                return abs(s_rolling_right - s_rolling_left).sum(
-                    axis=1, skipna=False
-                )
-            if diff == "l2":
-                return ((s_rolling_right - s_rolling_left) ** 2).sum(
-                    axis=1, skipna=False
-                ) ** 0.5
-
-        if callable(diff):
-            s_rolling = s.copy()
-            for i in range(len(s_rolling)):
-                s_rolling.iloc[i] = diff(
-                    s_rolling_left.iloc[i], s_rolling_right.iloc[i]
-                )
-            return s_rolling
-
-        raise ValueError("Invalid value of diff")
+            logger.info("Difference result: all values are NaN; no jumps computed.")
+        return result
 
 
 class ClassicSeasonalDecomposition(_TrainableUnivariateTransformer):

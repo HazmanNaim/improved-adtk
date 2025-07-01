@@ -3,6 +3,14 @@
 A detector detects anomalous time points from time series.
 
 """
+
+import logging
+
+logging.basicConfig(
+    level=logging.INFO, 
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+
 from .._detector_base import (  # _NonTrainableMultivariateDetector,
     _NonTrainableUnivariateDetector,
     _TrainableMultivariateDetector,

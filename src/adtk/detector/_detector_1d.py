@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
+import logging
 from scipy.stats import t
 from sklearn.linear_model import LinearRegression
 
@@ -25,6 +26,8 @@ from ..transformer import (
     RegressionResidual,
     Retrospect,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class CustomizedDetector1D(_TrainableUnivariateDetector):
@@ -135,12 +138,30 @@ class ThresholdAD(_NonTrainableUnivariateDetector):
         return ("low", "high")
 
     def _predict_core(self, s: pd.Series) -> pd.Series:
-        predicted = (
-            s > (self.high if (self.high is not None) else float("inf"))
-        ) | (s < (self.low if (self.low is not None) else -float("inf")))
-        predicted = predicted.astype(float)
-        predicted[s.isna()] = np.nan
-        return predicted
+        if self.low is not None and self.high is not None:
+            logger.info("ThresholdAD initialized with low=%.4f, high=%.4f", self.low, self.high)
+        elif self.low is not None:
+            logger.info("ThresholdAD initialized with low=%.4f only", self.low)
+        elif self.high is not None:
+            logger.info("ThresholdAD initialized with high=%.4f only", self.high)
+        else:
+            logger.warning("ThresholdAD initialized with no thresholds; all values considered normal")
+        logger.info("ThresholdAD prediction started on series of length %d", len(s))
+        high_mask = (s > self.high) if self.high is not None else pd.Series(False, index=s.index)
+        low_mask = (s < self.low) if self.low is not None else pd.Series(False, index=s.index)
+
+        if self.high is not None:
+            count_high = high_mask.sum()
+            logger.info("High threshold %.4f applied: %d/%d points above", self.high, count_high, len(s))
+        if self.low is not None:
+            count_low = low_mask.sum()
+            logger.info("Low threshold %.4f applied: %d/%d points below", self.low, count_low, len(s))
+
+        result = (high_mask | low_mask).astype(float)
+        result[s.isna()] = np.nan
+        total = int(result.sum(skipna=True))
+        logger.info("ThresholdAD prediction completed: %d anomalies detected", total)
+        return result
 
 
 class QuantileAD(_TrainableUnivariateDetector):
@@ -182,21 +203,49 @@ class QuantileAD(_TrainableUnivariateDetector):
         return ("low", "high")
 
     def _fit_core(self, s: pd.Series) -> None:
+        if self.low is not None and self.high is not None:
+            logger.info("QuantileAD initialized with low_quantile=%.2f, high_quantile=%.2f", self.low, self.high)
+        elif self.low is not None:
+            logger.info("QuantileAD initialized with low_quantile=%.2f only", self.low)
+        elif self.high is not None:
+            logger.info("QuantileAD initialized with high_quantile=%.2f only", self.high)
+        else:
+            logger.warning("QuantileAD initialized with no quantiles; no anomalies will be detected")
+        logger.info("QuantileAD fitting started: %d non-null points", s.count())
         if s.count() == 0:
-            raise RuntimeError("Valid values are not enough for training.")
-        if self.high is None:
-            self.abs_high_ = float("inf")
-        else:
-            self.abs_high_ = s.quantile(self.high)
-        if self.low is None:
-            self.abs_low_ = -float("inf")
-        else:
+            raise RuntimeError("QuantileAD requires non-empty series for fitting.")
+
+        if self.low is not None:
             self.abs_low_ = s.quantile(self.low)
+            logger.info("Fitted low quantile (%.2f): %.4f", self.low, self.abs_low_)
+        else:
+            self.abs_low_ = -np.inf
+            logger.info("Low quantile not set; lower bound = -inf")
+
+        if self.high is not None:
+            self.abs_high_ = s.quantile(self.high)
+            logger.info("Fitted high quantile (%.2f): %.4f", self.high, self.abs_high_)
+        else:
+            self.abs_high_ = np.inf
+            logger.info("High quantile not set; upper bound = +inf")
 
     def _predict_core(self, s: pd.Series) -> pd.Series:
-        predicted = (s > self.abs_high_) | (s < self.abs_low_)
-        predicted[s.isna()] = np.nan
-        return predicted
+        logger.info("QuantileAD prediction started on series of length %d", len(s))
+        high_mask = (s > self.abs_high_) if self.high is not None else pd.Series(False, index=s.index)
+        low_mask = (s < self.abs_low_) if self.low is not None else pd.Series(False, index=s.index)
+
+        if self.high is not None:
+            count_high = high_mask.sum()
+            logger.info("High quantile threshold %.4f: %d/%d points above", self.abs_high_, count_high, len(s))
+        if self.low is not None:
+            count_low = low_mask.sum()
+            logger.info("Low quantile threshold %.4f: %d/%d points below", self.abs_low_, count_low, len(s))
+
+        result = (high_mask | low_mask).astype(float)
+        result[s.isna()] = np.nan
+        total = int(result.sum(skipna=True))
+        logger.info("QuantileAD prediction completed: %d anomalies detected", total)
+        return result
 
 
 class InterQuartileRangeAD(_TrainableUnivariateDetector):
@@ -239,38 +288,46 @@ class InterQuartileRangeAD(_TrainableUnivariateDetector):
         return ("c",)
 
     def _fit_core(self, s: pd.Series) -> None:
-        if s.count() == 0:
-            raise RuntimeError("Valid values are not enough for training.")
+        count = s.count()
+        if isinstance(self.c, tuple):
+            logger.info("IQRAD initialized with lower_factor=%s, upper_factor=%s", self.c[0], self.c[1])
+        else:
+            logger.info("IQRAD initialized with symmetric factor=%.2f", self.c)
+        logger.info("IQRAD fitting started: %d non-null points", count)
+        if count == 0:
+            raise RuntimeError("IQRAD requires non-empty series for fitting.")
+
         q1 = s.quantile(0.25)
         q3 = s.quantile(0.75)
         iqr = q3 - q1
-        self.abs_low_ = (
-            (
-                q1
-                - iqr
-                * (self.c if (not isinstance(self.c, tuple)) else self.c[0])
-            )
-            if (
-                (self.c if (not isinstance(self.c, tuple)) else self.c[0])
-                is not None
-            )
-            else -float("inf")
-        )
-        self.abs_high_ = (
-            q3
-            + iqr * (self.c if (not isinstance(self.c, tuple)) else self.c[1])
-            if (
-                (self.c if (not isinstance(self.c, tuple)) else self.c[1])
-                is not None
-            )
-            else float("inf")
-        )
+        logger.info("Computed quartiles: Q1=%.4f, Q3=%.4f, IQR=%.4f", q1, q3, iqr)
+
+        c_low = c_high = None
+        if isinstance(self.c, tuple):
+            c_low, c_high = self.c
+        else:
+            c_low = c_high = self.c
+
+        self.abs_low_ = q1 - iqr * c_low if c_low is not None else -np.inf
+        self.abs_high_ = q3 + iqr * c_high if c_high is not None else np.inf
+        logger.info("IQRAD Thresholds set: abs_low_=%.4f, abs_high_=%.4f", self.abs_low_, self.abs_high_)
 
     def _predict_core(self, s: pd.Series) -> pd.Series:
-        predicted = (s > self.abs_high_) | (s < self.abs_low_)
-        predicted = predicted.astype(float)
-        predicted[s.isna()] = np.nan
-        return predicted
+        logger.info("IQRAD prediction started on series of length %d", len(s))
+        high_mask = s > self.abs_high_
+        low_mask = s < self.abs_low_
+
+        num_high = high_mask.sum()
+        num_low = low_mask.sum()
+        total = len(s)
+        logger.info("High IQR threshold %.4f: %d/%d above", self.abs_high_, num_high, total)
+        logger.info("Low IQR threshold %.4f: %d/%d below", self.abs_low_, num_low, total)
+
+        result = (high_mask | low_mask).astype(float)
+        result[s.isna()] = np.nan
+        anomalies = int(result.sum(skipna=True))
+        logger.info("IQRAD prediction complete: %d anomalies detected", anomalies)
+        return result
 
 
 class GeneralizedESDTestAD(_TrainableUnivariateDetector):
@@ -349,12 +406,12 @@ class GeneralizedESDTestAD(_TrainableUnivariateDetector):
         new_sum = s + self._normal_sum
         new_count = self._normal_count + 1
         new_mean = new_sum / new_count
-        new_squared_sum = s ** 2 + self._normal_squared_sum
+        new_squared_sum = s**2 + self._normal_squared_sum
         new_std = np.sqrt(
             (
                 new_squared_sum
                 - 2 * new_mean * new_sum
-                + new_count * new_mean ** 2
+                + new_count * new_mean**2
             )
             / (new_count - 1)
         )
@@ -528,12 +585,30 @@ class PersistAD(_TrainableUnivariateDetector):
         )
 
     def _fit_core(self, s: pd.Series) -> None:
+        logger.info(
+            "Initialized PersistAD with parameters: "
+            "window=%s, c=%.2f, side='%s', min_periods=%s, agg='%s'",
+            str(self.window),
+            self.c,
+            self.side,
+            str(self.min_periods),
+            self.agg,
+        )
         self._sync_params()
+        logger.info("Fitting PersistAD on series with %d points.", len(s))
         self.pipe_.fit(s)
+        logger.info("PersistAD fitting completed.")
 
     def _predict_core(self, s: pd.Series) -> pd.Series:
+        logger.info("Starting PersistAD anomaly prediction on series with %d points.", len(s))
         self._sync_params()
-        return self.pipe_.detect(s)
+
+        result = self.pipe_.detect(s)
+
+        num_anomalies = result.sum(skipna=True)
+        logger.info("PersistAD anomaly prediction completed. Total anomalies detected: %d", num_anomalies)
+
+        return result
 
 
 class LevelShiftAD(_TrainableUnivariateDetector):
@@ -590,6 +665,14 @@ class LevelShiftAD(_TrainableUnivariateDetector):
             Optional[int], Tuple[Optional[int], Optional[int]]
         ] = None,
     ) -> None:
+        self.window_str = (
+            f"({window[0]}, {window[1]})" if isinstance(window, tuple) else str(window)
+        )
+        self.min_periods_str = (
+            f"({min_periods[0]}, {min_periods[1]})"
+            if isinstance(min_periods, tuple)
+            else str(min_periods)
+        )
         self.pipe_ = Pipenet(
             {
                 "diff_abs": {
@@ -686,12 +769,28 @@ class LevelShiftAD(_TrainableUnivariateDetector):
         )
 
     def _fit_core(self, s: pd.Series) -> None:
+        logger.info(
+            "Initialized LevelShiftAD with parameters: window=%s, c=%.2f, side='%s', min_periods=%s",
+            self.window_str,
+            self.c,
+            self.side,
+            self.min_periods_str,
+        )
         self._sync_params()
+        logger.info("Fitting LevelShiftAD on series with %d points.", len(s))
         self.pipe_.fit(s)
+        logger.info("LevelShiftAD fitting completed.")
 
     def _predict_core(self, s: pd.Series) -> pd.Series:
+        logger.info("Starting LevelShiftAD anomaly prediction on series with %d points.", len(s))
         self._sync_params()
-        return self.pipe_.detect(s)
+
+        result = self.pipe_.detect(s)
+
+        num_anomalies = result.sum(skipna=True)
+        logger.info("LevelShiftAD anomaly prediction completed. Total anomalies detected: %d", num_anomalies)
+
+        return result
 
 
 class VolatilityShiftAD(_TrainableUnivariateDetector):
